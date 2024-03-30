@@ -551,7 +551,7 @@ error_code sys_rsx_context_attribute(u32 context_id, u32 package_id, u64 a3, u64
 		if ((a4 & 0x80000000) != 0)
 		{
 			// NOTE: There currently seem to only be 2 active heads on PS3
-			ensure(a3 < 2);
+			ensure(a3 < 3);
 
 			// last half byte gives buffer, 0xf seems to trigger just last queued
 			u8 idx_check = a4 & 0xf;
@@ -600,12 +600,12 @@ error_code sys_rsx_context_attribute(u32 context_id, u32 package_id, u64 a3, u64
 	case 0x103: // Display Queue
 	{
 		// NOTE: There currently seem to only be 2 active heads on PS3
-		ensure(a3 < 2);
+		ensure(a3 < 3);
 
 		driverInfo.head[a3].lastQueuedBufferId = static_cast<u32>(a4);
 		driverInfo.head[a3].flipFlags |= 0x40000000 | (1 << a4);
 
-		render->on_frame_end(static_cast<u32>(a4));
+		//render->on_frame_end(static_cast<u32>(a4));
 		if (!render->send_event(0, SYS_RSX_EVENT_QUEUE_BASE << a3, 0))
 		{
 			break;
@@ -678,7 +678,7 @@ error_code sys_rsx_context_attribute(u32 context_id, u32 package_id, u64 a3, u64
 		}
 
 		// NOTE: There currently seem to only be 2 active heads on PS3
-		ensure(a3 < 2);
+		ensure(a3 < 3);
 
 		driverInfo.head[a3].flipFlags.atomic_op([&](be_t<u32>& flipStatus)
 		{
@@ -856,9 +856,10 @@ error_code sys_rsx_context_attribute(u32 context_id, u32 package_id, u64 a3, u64
 	case 0xFEC: // hack: flip event notification
 	{
 		// we only ever use head 1 for now
-		driverInfo.head[1].flipFlags |= 0x80000000;
-		driverInfo.head[1].lastFlipTime = rsx_timeStamp(); // should rsxthread set this?
-		driverInfo.head[1].flipBufferId = static_cast<u32>(a3);
+		ensure(a3 < 3);
+		driverInfo.head[a3].flipFlags |= 0x80000000;
+		driverInfo.head[a3].lastFlipTime = rsx_timeStamp(); // should rsxthread set this?
+		driverInfo.head[a3].flipBufferId = static_cast<u32>(a3);
 
 		// seems gcmSysWaitLabel uses this offset, so lets set it to 0 every flip
 		// NOTE: Realhw resets 16 bytes of this semaphore for some reason
@@ -877,7 +878,7 @@ error_code sys_rsx_context_attribute(u32 context_id, u32 package_id, u64 a3, u64
 		}
 
 		// NOTE: There currently seem to only be 2 active heads on PS3
-		ensure(a3 < 2);
+		ensure(a3 < 3);
 
 		// todo: this is wrong and should be 'second' vblank handler and freq, but since currently everything is reported as being 59.94, this should be fine
 		driverInfo.head[a3].lastSecondVTime.atomic_op([&](be_t<u64>& time)

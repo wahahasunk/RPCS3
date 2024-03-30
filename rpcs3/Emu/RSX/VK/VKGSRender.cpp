@@ -724,8 +724,10 @@ VKGSRender::VKGSRender(utils::serial* ar) noexcept : GSRender(ar)
 		vk::change_image_layout(*m_current_command_buffer, target_image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, target_layout, range);
 
 	}
-
-	m_current_frame = &frame_context_storage[0];
+	m_current_queue_index = (m_current_queue_index + 1) % VK_MAX_ASYNC_FRAMES;	
+	m_current_frame = &frame_context_storage[m_current_queue_index];
+	m_current_frame->flags |= frame_context_state::dirty;
+	//m_current_frame = &frame_context_storage[0];
 
 	m_texture_cache.initialize((*m_device), m_device->get_graphics_queue(),
 			m_texture_upload_buffer_ring_info);
@@ -872,8 +874,8 @@ VKGSRender::VKGSRender(utils::serial* ar) noexcept : GSRender(ar)
 		}
 	}
 
-	if (!backend_config.supports_host_gpu_labels &&
-		!backend_config.supports_asynchronous_compute)
+	if ((!backend_config.supports_host_gpu_labels &&
+			!backend_config.supports_asynchronous_compute) ||g_cfg.core.mgs4_FNMS)
 	{
 		// Disable passthrough DMA unless we enable a feature that requires it.
 		// I'm avoiding an explicit checkbox for this until I figure out why host labels don't fix all problems with passthrough.

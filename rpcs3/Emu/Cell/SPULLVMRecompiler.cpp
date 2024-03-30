@@ -5594,6 +5594,13 @@ public:
 			const auto a = value<f32[4]>(ci->getOperand(0));
 			const auto b = value<f32[4]>(ci->getOperand(1));
 
+			if (g_cfg.core.mgs4_FM)
+			{
+				const auto ca = clamp_smax(a);
+				const auto cb = clamp_smax(b);
+				return eval(ca * cb);
+			}
+
 			if (g_cfg.core.spu_xfloat_accuracy == xfloat_accuracy::approximate)
 			{
 				if (a.value == b.value)
@@ -5952,6 +5959,20 @@ public:
 		{
 			const auto [a, b, c] = get_vrs<f64[4]>(op.ra, op.rb, op.rc);
 			set_vr(op.rt4, fmuladd(-a, b, c));
+			return;
+		}
+
+		if (g_cfg.core.spu_xfloat_accuracy != xfloat_accuracy::accurate && g_cfg.core.mgs4_FNMS)
+		{
+			// const auto [a, b, c] = get_vrs<f64[4]>(op.ra, op.rb, op.rc);
+			// set_vr(op.rt4, fmuladd(-a, b, c));
+			const auto a = get_vr<f32[4]>(op.ra);
+			const auto b = get_vr<f32[4]>(op.rb);
+			const auto ma = eval(sext<s32[4]>(fcmp_uno(a != fsplat<f32[4]>(0.))));
+			const auto mb = eval(sext<s32[4]>(fcmp_uno(b != fsplat<f32[4]>(0.))));
+			const auto ca = eval(bitcast<f32[4]>(bitcast<s32[4]>(a) & mb));
+			const auto cb = eval(bitcast<f32[4]>(bitcast<s32[4]>(b) & ma));
+			set_vr(op.rt4, fma32x4(eval(-(ca)), (cb), get_vr<f32[4]>(op.rc)));
 			return;
 		}
 

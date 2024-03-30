@@ -1961,7 +1961,7 @@ namespace rsx
 		}
 
 		rsx->reset();
-		rsx->on_frame_end(arg);
+		//rsx->on_frame_end(arg);
 		rsx->request_emu_flip(arg);
 		vm::_ref<atomic_t<u128>>(rsx->label_addr + 0x10).store(u128{});
 	}
@@ -3588,7 +3588,7 @@ namespace rsx
 		methods[FIFO::FIFO_DRAW_BARRIER >> 2]             = nullptr;
 
 		bind_array(GCM_FLIP_HEAD, 1, 2, nullptr);
-		bind_array(GCM_DRIVER_QUEUE, 1, 8, nullptr);
+		bind_array(GCM_DRIVER_QUEUE, 1,3, nullptr);
 
 		bind_array(0x400 >> 2, 1, 0x10, nullptr);
 		bind_array(0x440 >> 2, 1, 0x20, nullptr);
@@ -3729,7 +3729,7 @@ namespace rsx
 		// lv1 hypervisor
 		bind_array(GCM_SET_USER_COMMAND, 1, 2, user_command);
 		bind_range<GCM_FLIP_HEAD, 1, 2, gcm::driver_flip>();
-		bind_range<GCM_DRIVER_QUEUE, 1, 8, gcm::queue_flip>();
+		bind_range<GCM_DRIVER_QUEUE, 1, 3, gcm::queue_flip>();
 
 		// custom methods
 		bind(GCM_FLIP_COMMAND, flip_command);

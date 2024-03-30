@@ -44,6 +44,8 @@ struct cfg_root : cfg::node
 		cfg::_bool spu_accurate_getllar{ this, "Accurate GETLLAR", false, true };
 		cfg::_bool spu_accurate_dma{ this, "Accurate SPU DMA", false };
 		cfg::_bool spu_accurate_reservations{ this, "Accurate SPU Reservations", true };
+		cfg::_bool mgs4_FNMS{this, "MGS4 FNMS", false};
+		cfg::_bool mgs4_FM{this, "MGS4 FM", false};
 		cfg::_bool accurate_cache_line_stores{ this, "Accurate Cache Line Stores", false };
 		cfg::_bool rsx_accurate_res_access{this, "Accurate RSX reservation access", false, true};
 

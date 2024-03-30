@@ -998,7 +998,7 @@ namespace rsx
 				const u64 post_event_time = start_time + (local_vblank_count + 1) * vblank_period / vblank_rate;
 
 				// Calculate time remaining to that time (0 if we passed it)
-				const u64 wait_for = current >= post_event_time ? 0 : post_event_time - current;
+				const u64 wait_for = current >= post_event_time ? 0 : (post_event_time - current)/2;
 
 #ifdef __linux__
 				const u64 wait_sleep = wait_for;
@@ -1392,7 +1392,7 @@ namespace rsx
 		{
 			// NOTE: This has to be executed immediately
 			// Delaying this operation can cause desync due to the delay in firing the flip event
-			handle_emu_flip(async_flip_buffer);
+			handle_emu_flip(async_flip_buffer);			
 		}
 
 		if (state != FIFO::state::lock_wait)
@@ -3698,11 +3698,7 @@ namespace rsx
 		}
 		else // requested 'manually' through ppu syscall
 		{
-			if (async_flip_requested & flip_request::emu_requested)
-			{
-				// ignore multiple requests until previous happens
-				return true;
-			}
+			handle_emu_flip(buffer);
 
 			async_flip_buffer = buffer;
 			async_flip_requested |= flip_request::emu_requested;
@@ -3724,15 +3720,23 @@ namespace rsx
 		if (m_queued_flip.in_progress)
 		{
 			// Rescursion not allowed!
+			//m_queued_flip.in_progress = false;
+			//on_frame_end(buffer, true);
+			//std::this_thread::yield();
+			//execute_nop_draw();
 			return;
 		}
 
 		if (!m_queued_flip.pop(buffer))
 		{
 			// Frame was not queued before flipping
-			on_frame_end(buffer, true);
+			on_frame_end(buffer, true);			
 			ensure(m_queued_flip.pop(buffer));
+			//std::this_thread::yield();
+			//execute_nop_draw();
+
 		}
+
 
 		double limit = 0.;
 		const auto frame_limit = g_disable_frame_limit ? frame_limit_type::none : g_cfg.video.frame_limit;
@@ -3767,6 +3771,7 @@ namespace rsx
 				{
 					const auto delay_us = target_rsx_flip_time - time;
 					lv2_obj::wait_timeout(delay_us, nullptr, false);
+					//std::this_thread::sleep_for((delay_us * 1ms / 1000*0.5));
 					performance_counters.idle_time += delay_us;
 				}
 			}
@@ -3789,7 +3794,7 @@ namespace rsx
 			{
 				// Not yet signaled, handle it later
 				async_flip_requested |= flip_request::emu_requested;
-				async_flip_buffer = buffer;
+				async_flip_buffer = buffer;				
 				return;
 			}
 
