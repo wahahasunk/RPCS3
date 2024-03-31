@@ -1024,7 +1024,7 @@ void spu_cache::initialize(bool build_existing_cache)
 					}
 				}
 
-				if (new_entry != umax && !spu_thread::is_exec_code(new_entry, { reinterpret_cast<const u8*>(ls.data()), SPU_LS_SIZE }))
+				if (new_entry != umax && !spu_thread::is_exec_code(new_entry, { reinterpret_cast<const u8*>(ls.data()), SPU_LS_SIZE }, 0, true))
 				{
 					new_entry = umax;
 				}
@@ -1033,7 +1033,7 @@ void spu_cache::initialize(bool build_existing_cache)
 				{
 					new_entry = start_new;
 
-					while (new_entry < next_func && (ls[start_new / 4] < 0x3fffc || !spu_thread::is_exec_code(new_entry, { reinterpret_cast<const u8*>(ls.data()), SPU_LS_SIZE })))
+					while (new_entry < next_func && (ls[start_new / 4] < 0x3fffc || !spu_thread::is_exec_code(new_entry, { reinterpret_cast<const u8*>(ls.data()), SPU_LS_SIZE }, 0, true)))
 					{
 						new_entry += 4;
 					}
@@ -2281,13 +2281,13 @@ std::vector<u32> spu_thread::discover_functions(u32 base_addr, std::span<const u
 	calls.erase(std::remove_if(calls.begin(), calls.end(), [&](u32 caller)
 	{
 		// Check the validity of both the callee code and the following caller code
-		return !is_exec_code(caller, ls, base_addr) || !is_exec_code(caller + 4, ls, base_addr);
+		return !is_exec_code(caller, ls, base_addr, true) || !is_exec_code(caller + 4, ls, base_addr, true);
 	}), calls.end());
 
 	branches.erase(std::remove_if(branches.begin(), branches.end(), [&](u32 caller)
 	{
 		// Check the validity of the callee code
-		return !is_exec_code(caller, ls, base_addr);
+		return !is_exec_code(caller, ls, base_addr, true);
 	}), branches.end());
 
 	std::vector<u32> addrs;
@@ -2304,6 +2304,49 @@ std::vector<u32> spu_thread::discover_functions(u32 base_addr, std::span<const u
 		}
 
 		addrs.push_back(func);
+
+		// Detect an "arguments passing" block, possible queue another function
+		for (u32 next = func, it = 10; it && next >= base_addr && next < std::min<u32>(base_addr + ::size32(ls), 0x3FFF0); it--, next += 4)
+		{
+			const spu_opcode_t test_op{read_from_ptr<be_t<u32>>(ls, next - base_addr)};
+			const auto type = g_spu_itype.decode(test_op.opcode);
+
+			if (type & spu_itype::branch && type != spu_itype::BR)
+			{
+				break;
+			}
+
+			if (type == spu_itype::UNK || !test_op.opcode)
+			{
+				break;
+			}
+
+			if (type != spu_itype::BR)
+			{
+				continue;
+			}
+
+			const u32 target = op_branch_targets(next, op)[0];
+
+			if (target == umax || addr + 4 == target || target == addr || std::count(addrs.begin(), addrs.end(), target))
+			{
+				break;
+			}
+
+			// Detect backwards branch to the block in examination
+			if (target >= func && target <= next)
+			{
+				break;
+			}
+
+			if (!is_exec_code(target, ls, base_addr, true))
+			{
+				break;
+			}
+
+			addrs.push_back(target);
+			break;
+		}
 	}
 
 	for (u32 addr : branches)
@@ -2317,7 +2360,52 @@ std::vector<u32> spu_thread::discover_functions(u32 base_addr, std::span<const u
 			continue;
 		}
 
-		// Search for AI R1, +x or OR R3/4, Rx, 0
+		// Search for AI R1, -x in the called code
+		// Reasoning: AI R1, -x means stack frame creation, this is likely be a function
+		for (u32 next = func, it = 10; it && next >= base_addr && next < std::min<u32>(base_addr + ::size32(ls), 0x3FFF0); it--, next += 4)
+		{
+			const spu_opcode_t test_op{read_from_ptr<be_t<u32>>(ls, next - base_addr)};
+			const auto type = g_spu_itype.decode(test_op.opcode);
+
+			if (type & spu_itype::branch)
+			{
+				break;
+			}
+
+			if (type == spu_itype::UNK || !test_op.opcode)
+			{
+				break;
+			}
+
+			bool is_func = false;
+
+			if (type == spu_itype::AI && test_op.rt == 1u && test_op.ra == 1u)
+			{
+				if (test_op.si10 >= 0)
+				{
+					break;
+				}
+
+				is_func = true;
+			}
+
+			if (!is_func)
+			{
+				continue;
+			}
+
+			addr = SPU_LS_SIZE + 4; // Terminate the next condition, no further checks needed
+
+			if (std::count(addrs.begin(), addrs.end(), func))
+			{
+				break;
+			}
+
+			addrs.push_back(func);
+			break;
+		}
+
+		// Search for AI R1, +x or OR R3/4, Rx, 0 before the branch
 		// Reasoning: AI R1, +x means stack pointer restoration, branch after that is likely a tail call
 		// R3 and R4 are common function arguments because they are the first two
 		for (u32 back = addr - 4, it = 10; it && back >= base_addr && back < std::min<u32>(base_addr + ::size32(ls), 0x3FFF0); it--, back -= 4)
@@ -4407,11 +4495,12 @@ struct spu_llvm_worker
 	void operator()()
 	{
 		// SPU LLVM Recompiler instance
-		const auto compiler = spu_recompiler_base::make_llvm_recompiler();
-		compiler->init();
+		std::unique_ptr<spu_recompiler_base> compiler;
 
 		// Fake LS
-		std::vector<be_t<u32>> ls(0x10000);
+		std::vector<be_t<u32>> ls;
+
+		bool set_relax_flag = false;
 
 		for (auto slice = registered.pop_all();; [&]
 		{
@@ -4423,6 +4512,12 @@ struct spu_llvm_worker
 			if (slice || thread_ctrl::state() == thread_state::aborting)
 			{
 				return;
+			}
+
+			if (set_relax_flag)
+			{
+				spu_thread::g_spu_work_count--;
+				set_relax_flag = false;
 			}
 
 			thread_ctrl::wait_on(utils::bless<atomic_t<u32>>(&registered)[1], 0);
@@ -4444,6 +4539,21 @@ struct spu_llvm_worker
 			if (!prog->second)
 			{
 				break;
+			}
+
+			if (!compiler)
+			{
+				// Postponed initialization
+				compiler = spu_recompiler_base::make_llvm_recompiler();
+				compiler->init();
+
+				ls.resize(SPU_LS_SIZE / sizeof(be_t<u32>));
+			}
+
+			if (!set_relax_flag)
+			{
+				spu_thread::g_spu_work_count++;
+				set_relax_flag = true;
 			}
 
 			const auto& func = *prog->second;
@@ -4487,11 +4597,17 @@ struct spu_llvm_worker
 			else
 			{
 				spu_log.fatal("[0x%05x] Compilation failed.", func.entry_point);
-				return;
+				break;
 			}
 
 			// Clear fake LS
 			std::memset(ls.data() + start / 4, 0, 4 * (size0 - 1));
+		}
+
+		if (set_relax_flag)
+		{
+			spu_thread::g_spu_work_count--;
+			set_relax_flag = false;
 		}
 	}
 };
@@ -4512,6 +4628,17 @@ struct spu_llvm
 	void operator()()
 	{
 		if (g_cfg.core.spu_decoder != spu_decoder_type::llvm)
+		{
+			return;
+		}
+
+		while (!registered && thread_ctrl::state() != thread_state::aborting)
+		{
+			// Wait for the first SPU block before launching any thread
+			thread_ctrl::wait_on(utils::bless<atomic_t<u32>>(&registered)[1], 0);
+		}
+
+		if (thread_ctrl::state() == thread_state::aborting)
 		{
 			return;
 		}
@@ -4566,18 +4693,21 @@ struct spu_llvm
 
 		if (uint hc = utils::get_thread_count(); hc >= 12)
 		{
-			worker_count = hc - 10;
+			worker_count = hc - 12 + 3;
+		}
+		else if (hc >= 6)
+		{
+			worker_count = 2;
 		}
 
 		u32 worker_index = 0;
 		u32 notify_compile_count = 0;
+		u32 compile_pending = 0;
 		std::vector<u8> notify_compile(worker_count);
 
 		m_workers = make_single<named_thread_group<spu_llvm_worker>>("SPUW.", worker_count);
 		auto workers_ptr = m_workers.load();
 		auto& workers = *workers_ptr;
-
-		usz add_count = 65535;
 
 		while (thread_ctrl::state() != thread_state::aborting)
 		{
@@ -4601,7 +4731,7 @@ struct spu_llvm
 					{
 						if (notify_compile[i])
 						{
-							(workers.begin() + (i % worker_count))->registered.notify();
+							(workers.begin() + i)->registered.notify();
 						}
 					}
 				}
@@ -4609,9 +4739,9 @@ struct spu_llvm
 				// Interrupt profiler thread and put it to sleep
 				static_cast<void>(prof_mutex.reset());
 				thread_ctrl::wait_on(utils::bless<atomic_t<u32>>(&registered)[1], 0);
-				add_count = 65535; // Reset count
 				std::fill(notify_compile.begin(), notify_compile.end(), 0); // Reset notification flags
 				notify_compile_count = 0;
+				compile_pending = 0;
 				continue;
 			}
 
@@ -4652,18 +4782,26 @@ struct spu_llvm
 			{
 				notify_compile[worker_index % worker_count] = 1;
 				notify_compile_count++;
+			}
 
-				if (notify_compile_count == notify_compile.size())
+			compile_pending++;
+
+			// Notify all before queue runs out if there is considerable excess
+			// Optimized that: if there are many workers, it acts soon
+			// If there are only a few workers, it postpones notifications until there is some more workload
+			if (notify_compile_count && std::min<u32>(7, utils::aligned_div<u32>(worker_count * 2, 3) + 2) <= compile_pending)
+			{
+				for (usz i = 0; i < worker_count; i++)
 				{
-					// Notify all
-					for (usz i = 0; i < worker_count; i++)
+					if (notify_compile[i])
 					{
-						(workers.begin() + (i % worker_count))->registered.notify();
+						(workers.begin() + i)->registered.notify();
 					}
-
-					std::fill(notify_compile.begin(), notify_compile.end(), 0); // Reset notification flags
-					notify_compile_count = 0;
 				}
+
+				std::fill(notify_compile.begin(), notify_compile.end(), 0); // Reset notification flags
+				notify_compile_count = 0;
+				compile_pending = 0;
 			}
 
 			worker_index++;

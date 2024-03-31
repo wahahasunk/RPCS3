@@ -20,6 +20,7 @@
 #include "Emu/Io/Null/null_camera_handler.h"
 #include "Emu/Io/Null/null_music_handler.h"
 #include "Emu/vfs_config.h"
+#include "util/init_mutex.hpp"
 #include "Input/raw_mouse_handler.h"
 #include "trophy_notification_helper.h"
 #include "save_data_dialog.h"
@@ -28,6 +29,7 @@
 #include "recvmessage_dialog_frame.h"
 #include "sendmessage_dialog_frame.h"
 #include "stylesheets.h"
+#include "progress_dialog.h"
 
 #include <QScreen>
 #include <QFontDatabase>
@@ -662,6 +664,53 @@ void gui_application::InitializeCallbacks()
 
 			mb->open();
 			update_timer->start(1000);
+		});
+	};
+
+	callbacks.on_save_state_progress = [this](std::shared_ptr<atomic_t<bool>> closed_successfully, stx::shared_ptr<utils::serial> ar_ptr, std::shared_ptr<void> init_mtx)
+	{
+		Emu.CallFromMainThread([this, closed_successfully, ar_ptr, init_mtx]
+		{
+			const auto half_seconds = std::make_shared<int>(1);
+
+			progress_dialog* pdlg = new progress_dialog(tr("Creating Save-State / Do Not Close RPCS3"), tr("Please wait..."), tr("Hide Progress"), 0, 100, true, m_main_window);
+			pdlg->setAutoReset(false);
+			pdlg->setAutoClose(true);
+			pdlg->show();
+
+			QString text_base = tr("Waiting for %0 second(s), %1 written");
+
+			pdlg->setLabelText(text_base.arg(0).arg("0B"));
+			pdlg->setAttribute(Qt::WA_DeleteOnClose);
+
+			QTimer* update_timer = new QTimer(pdlg);
+
+			connect(update_timer, &QTimer::timeout, [pdlg, ar_ptr, half_seconds, text_base, closed_successfully, init_mtx]()
+			{
+				auto init = static_cast<stx::init_mutex*>(init_mtx.get())->access();
+
+				if (!init)
+				{
+					pdlg->reject();
+					return;
+				}
+
+				*half_seconds += 1;
+
+				const usz bytes_written = ar_ptr->get_size();
+				pdlg->setLabelText(text_base.arg(*half_seconds / 2).arg(gui::utils::format_byte_size(bytes_written)));
+
+				// 300MB -> 50%, 600MB -> 75%, 1200MB -> 87.5% etc
+				pdlg->setValue(std::clamp(static_cast<int>(100. - 100. / std::pow(2., std::fmax(0.01, bytes_written * 1. / (300 * 1024 * 1024)))), 2, 100));
+
+				if (*closed_successfully)
+				{
+					pdlg->reject();
+				}
+			});
+
+			pdlg->open();
+			update_timer->start(500);
 		});
 	};
 

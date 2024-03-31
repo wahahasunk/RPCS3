@@ -268,7 +268,8 @@ public:
 	{
 		u64 all;
 		bf_t<s64, 0, 13> prio; // Thread priority (0..3071) (firs 12-bits)
-		bf_t<s64, 13, 51> order; // Thread enqueue order (last 52-bits)
+		bf_t<s64, 13, 50> order; // Thread enqueue order (last 52-bits)
+		bf_t<u64, 63, 1> preserve_bit; // Preserve value for savestates
 	};
 
 	atomic_t<ppu_prio_t> prio{};
@@ -294,6 +295,7 @@ public:
 	u64 syscall_args[8]{0}; // Last syscall arguments stored
 	const char* current_function{}; // Current function name for diagnosis, optimized for speed.
 	const char* last_function{}; // Sticky copy of current_function, is not cleared on function return
+	const char* current_module{}; // Current module name, for savestates.
 
 	const bool is_interrupt_thread; // True for interrupts-handler threads
 

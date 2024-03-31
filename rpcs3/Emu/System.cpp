@@ -43,6 +43,7 @@
 #include "../Crypto/unself.h"
 #include "../Crypto/unzip.h"
 #include "util/logs.hpp"
+#include "util/init_mutex.hpp"
 
 #include <fstream>
 #include <memory>
@@ -161,17 +162,16 @@ void fmt_class_string<cfg_mode>::format(std::string& out, u64 arg)
 	});
 }
 
-void Emulator::CallFromMainThread(std::function<void()>&& func, atomic_t<u32>* wake_up, bool track_emu_state, u64 stop_ctr) const
+void Emulator::CallFromMainThread(std::function<void()>&& func, atomic_t<u32>* wake_up, bool track_emu_state, u64 stop_ctr, u32 line, u32 col, const char* file, const char* fun) const
 {
-	if (!track_emu_state)
+	std::function<void()> final_func = [this, before = IsStopped(), track_emu_state, thread_name = thread_ctrl::get_name(), src = src_loc{line, col, file, fun}
+		, count = (stop_ctr == umax ? +m_stop_ctr : stop_ctr), func = std::move(func)]
 	{
-		m_cb.call_from_main_thread(std::move(func), wake_up);
-		return;
-	}
+		const bool call_it = (!track_emu_state || (count == m_stop_ctr && before == IsStopped()));
 
-	std::function<void()> final_func = [this, before = IsStopped(), count = (stop_ctr == umax ? +m_stop_ctr : stop_ctr), func = std::move(func)]
-	{
-		if (count == m_stop_ctr && before == IsStopped())
+		sys_log.trace("Callback from thread '%s' at [%s] is %s", thread_name, src, call_it ? "called" : "skipped");
+
+		if (call_it)
 		{
 			func();
 		}
@@ -184,14 +184,17 @@ void Emulator::BlockingCallFromMainThread(std::function<void()>&& func, u32 line
 {
 	atomic_t<u32> wake_up = 0;
 
-	CallFromMainThread(std::move(func), &wake_up);
+	sys_log.trace("Blocking Callback from thread '%s' at [%s] is queued", thread_ctrl::get_name(), src_loc{line, col, file, fun});
+
+	CallFromMainThread(std::move(func), &wake_up, true, umax, line, col, file, fun);
 
 	while (!wake_up)
 	{
 		if (!thread_ctrl::get_current())
 		{
-			fmt::throw_exception("Current thread null while calling BlockingCallFromMainThread from %s", src_loc{line, col, file, fun});
+			fmt::throw_exception("Calling thread of BlockingCallFromMainThread is not of named_thread<>, calling from %s", src_loc{line, col, file, fun});
 		}
+
 		wake_up.wait(0);
 	}
 }
@@ -2733,6 +2736,17 @@ void Emulator::GracefulShutdown(bool allow_autoexit, bool async_op, bool savesta
 		return;
 	}
 
+	if (!savestate && m_emu_state_close_pending)
+	{
+		while (!async_op && m_state != system_state::stopped)
+		{
+			process_qt_events();
+			std::this_thread::sleep_for(16ms);
+		}
+
+		return;
+	}
+
 	if (old_state == system_state::paused)
 	{
 		Resume();
@@ -2805,7 +2819,7 @@ void Emulator::GracefulShutdown(bool allow_autoexit, bool async_op, bool savesta
 	}
 }
 
-extern bool try_lock_vdec_context_creation();
+extern bool check_if_vdec_contexts_exist();
 extern bool try_lock_spu_threads_in_a_state_compatible_with_savestates(bool revert_lock = false);
 
 void Emulator::Kill(bool allow_autoexit, bool savestate, savestate_stage* save_stage)
@@ -2819,7 +2833,7 @@ void Emulator::Kill(bool allow_autoexit, bool savestate, savestate_stage* save_s
 	{
 		if (!save_stage || !save_stage->prepared)
 		{
-			if (m_savestate_pending.exchange(true))
+			if (m_emu_state_close_pending.exchange(true))
 			{
 				return;
 			}
@@ -2834,10 +2848,15 @@ void Emulator::Kill(bool allow_autoexit, bool savestate, savestate_stage* save_s
 
 					if (!g_cfg.savestate.compatible_mode)
 					{
+						rsx::overlays::queue_message(localized_string_id::SAVESTATE_FAILED_DUE_TO_MISSING_SPU_SETTING);
 						sys_log.error("Enabling SPU Savestates-Compatible Mode in Advanced tab may fix this.");
 					}
+					else
+					{
+						rsx::overlays::queue_message(localized_string_id::SAVESTATE_FAILED_DUE_TO_SPU);
+					}
 
-					m_savestate_pending = false;
+					m_emu_state_close_pending = false;
 
 					CallFromMainThread([pause = std::move(pause_thread)]()
 					{
@@ -2847,16 +2866,41 @@ void Emulator::Kill(bool allow_autoexit, bool savestate, savestate_stage* save_s
 					return;
 				}
 
-				if (!IsStopped() && !try_lock_vdec_context_creation())
+				bool savedata_error = false;
+				bool vdec_error = false;
+
+				if (!g_fxo->get<hle_locks_t>().try_finalize([&]()
 				{
+					// List of conditions required for emulation to save properly
+					vdec_error = check_if_vdec_contexts_exist();
+					return !vdec_error;
+				}))
+				{
+					// Unlock SPUs
 					try_lock_spu_threads_in_a_state_compatible_with_savestates(true);
 
-					sys_log.error("Failed to savestate: HLE VDEC (video decoder) context(s) exist."
-						"\nLLE libvdec.sprx by selecting it in Advanced tab -> Firmware Libraries."
-						"\nYou need to close the game for it to take effect."
-						"\nIf you cannot close the game due to losing important progress, your best chance is to skip the current cutscenes if any are played and retry.");
+					savedata_error = !vdec_error; // For now it is implied a savedata error
 
-					m_savestate_pending = false;
+					if (vdec_error)
+					{
+						rsx::overlays::queue_message(localized_string_id::SAVESTATE_FAILED_DUE_TO_VDEC);
+
+						sys_log.error("Failed to savestate: HLE VDEC (video decoder) context(s) exist."
+							"\nLLE libvdec.sprx by selecting it in Advanced tab -> Firmware Libraries."
+							"\nYou need to close the game for it to take effect."
+							"\nIf you cannot close the game due to losing important progress, your best chance is to skip the current cutscenes if any are played and retry.");
+					}
+
+					if (savedata_error)
+					{
+						rsx::overlays::queue_message(localized_string_id::SAVESTATE_FAILED_DUE_TO_SAVEDATA);
+
+						sys_log.error("Failed to savestate: Savedata operation is active."
+							"\nYour best chance is to wait for the current game saving operation to finish and retry."
+							"\nThe game is probably displaying a saving cicrle or other gesture to indicate that it is saving.");
+					}
+
+					m_emu_state_close_pending = false;
 
 					CallFromMainThread([pause = std::move(pause_thread)]()
 					{
@@ -2887,6 +2931,15 @@ void Emulator::Kill(bool allow_autoexit, bool savestate, savestate_stage* save_s
 	{
 		return std::string();
 	};
+
+	if (save_stage && save_stage->prepared)
+	{
+		//
+	}
+	else if (m_emu_state_close_pending.exchange(true))
+	{
+		return;
+	}
 
 	if (system_state old_state = m_state.fetch_op([](system_state& state)
 	{
@@ -2919,7 +2972,7 @@ void Emulator::Kill(bool allow_autoexit, bool savestate, savestate_stage* save_s
 		m_config_mode = cfg_mode::custom;
 		read_used_savestate_versions();
 		m_savestate_extension_flags1 = {};
-		m_savestate_pending = false;
+		m_emu_state_close_pending = false;
 
 		// Enable logging
 		rpcs3::utils::configure_logs(true);
@@ -2968,13 +3021,18 @@ void Emulator::Kill(bool allow_autoexit, bool savestate, savestate_stage* save_s
 
 	*join_thread = make_ptr(new named_thread("Emulation Join Thread"sv, [join_thread, savestate, allow_autoexit, this]() mutable
 	{
-		named_thread stop_watchdog("Stop Watchdog"sv, [this]()
+		fs::pending_file file;
+		std::shared_ptr<stx::init_mutex> init_mtx = std::make_shared<stx::init_mutex>();
+		std::shared_ptr<bool> join_ended = std::make_shared<bool>(false);
+		atomic_ptr<utils::serial> to_ar;
+
+		named_thread stop_watchdog("Stop Watchdog"sv, [&to_ar, init_mtx, join_ended, this]()
 		{
 			const auto closed_sucessfully = std::make_shared<atomic_t<bool>>(false);
 
 			bool is_being_held_longer = false;
 
-			for (int i = 0; thread_ctrl::state() != thread_state::aborting;)
+			for (int i = 0; !*join_ended && thread_ctrl::state() != thread_state::aborting;)
 			{
 				if (g_watchdog_hold_ctr)
 				{
@@ -2998,6 +3056,25 @@ void Emulator::Kill(bool allow_autoexit, bool savestate, savestate_stage* save_s
 				thread_ctrl::wait_for(5'000);
 			}
 
+			while (thread_ctrl::state() != thread_state::aborting)
+			{
+				if (auto ar_ptr = to_ar.load())
+				{
+					// Total amount of waiting: about 10s
+					GetCallbacks().on_save_state_progress(closed_sucessfully, ar_ptr, init_mtx);
+
+					while (thread_ctrl::state() != thread_state::aborting)
+					{
+						thread_ctrl::wait_for(5'000);
+					}
+
+					break;
+				}
+
+				thread_ctrl::wait_for(5'000);
+			}
+
+
 			*closed_sucessfully = true;
 		});
 
@@ -3016,10 +3093,9 @@ void Emulator::Kill(bool allow_autoexit, bool savestate, savestate_stage* save_s
 
 		sys_log.notice("All threads have been stopped.");
 
-		std::unique_ptr<utils::serial> to_ar;
-
-		fs::pending_file file;
 		std::string path;
+
+		static_cast<void>(init_mtx->init());
 
 		while (savestate)
 		{
@@ -3046,12 +3122,15 @@ void Emulator::Kill(bool allow_autoexit, bool savestate, savestate_stage* save_s
 				break;
 			}
 
-			to_ar = std::make_unique<utils::serial>();
-			to_ar->m_file_handler = make_compressed_serialization_file_handler(file.file);
+			auto serial_ptr = stx::make_single<utils::serial>();
+			serial_ptr->m_file_handler = make_compressed_serialization_file_handler(file.file);
+			to_ar = std::move(serial_ptr);
 
 			signal_system_cache_can_stay();
 			break;
 		}
+
+		*join_ended = true;
 
 		if (savestate)
 		{
@@ -3063,7 +3142,7 @@ void Emulator::Kill(bool allow_autoexit, bool savestate, savestate_stage* save_s
 					return fmt::format("Emu State Capture Thread: '%s'", g_tls_serialize_name);
 				};
 
-				auto& ar = *to_ar;
+				auto& ar = *to_ar.load();
 
 				read_used_savestate_versions(); // Reset version data
 				USING_SERIALIZATION_VERSION(global_version);
@@ -3194,6 +3273,10 @@ void Emulator::Kill(bool allow_autoexit, bool savestate, savestate_stage* save_s
 
 				ar(std::array<u8, 32>{}); // Reserved for future use
 				ar(timestamp);
+
+				// Final file write, the file is ready to be committed
+				ar.seek_end();
+				ar.m_file_handler->finalize(ar);
 			});
 
 			// Join it
@@ -3207,16 +3290,11 @@ void Emulator::Kill(bool allow_autoexit, bool savestate, savestate_stage* save_s
 			}
 		}
 
-		stop_watchdog = thread_state::aborting;
+		stop_watchdog = thread_state::finished;
+		static_cast<void>(init_mtx->reset());
 
 		if (savestate)
 		{
-			auto& ar = *to_ar;
-
-			// Final file write, the file is ready to be committed
-			ar.seek_end();
-			ar.m_file_handler->finalize(ar);
-
 			fs::stat_t file_stat{};
 
 			if (!file.commit() || !fs::get_stat(path, file_stat))
@@ -3251,8 +3329,6 @@ void Emulator::Kill(bool allow_autoexit, bool savestate, savestate_stage* save_s
 					m_path = path;
 				}
 			}
-
-			ar.set_reading_state();
 		}
 
 		// Log additional debug information - do not do it on the main thread due to the concern of halting UI events
@@ -3374,7 +3450,7 @@ void Emulator::Kill(bool allow_autoexit, bool savestate, savestate_stage* save_s
 			m_ar.reset();
 			read_used_savestate_versions();
 			m_savestate_extension_flags1 = {};
-			m_savestate_pending = false;
+			m_emu_state_close_pending = false;
 
 			initialize_timebased_time(0, true);
 

@@ -150,12 +150,12 @@ usz uncompressed_serialization_file_handler::get_size(const utils::serial& ar, u
 {
 	if (ar.is_writing())
 	{
-		return m_file->size();
+		return *m_file ? m_file->size() : 0;
 	}
 
 	const usz memory_available = ar.data_offset + ar.data.size();
 
-	if (memory_available >= recommended)
+	if (memory_available >= recommended || !*m_file)
 	{
 		// Avoid calling size() if possible
 		return memory_available;
@@ -209,7 +209,7 @@ void compressed_serialization_file_handler::initialize(utils::serial& ar)
 		}
 
 		m_zs = {};
-		ensure(deflateInit2(&m_zs, 9, Z_DEFLATED, 16 + 15, 9, Z_DEFAULT_STRATEGY) == Z_OK);
+		ensure(deflateInit2(&m_zs, ar.expect_little_data() ? 9 : 8, Z_DEFLATED, 16 + 15, 9, Z_DEFAULT_STRATEGY) == Z_OK);
 #ifndef _MSC_VER
 #pragma GCC diagnostic pop
 #endif
@@ -420,7 +420,15 @@ bool compressed_serialization_file_handler::handle_file_op(utils::serial& ar, us
 		const usz old_size = ar.data.size();
 
 		// Try to prefetch data by reading more than requested
-		ar.data.resize(std::min<usz>(read_limit, std::max<usz>({ ar.data.capacity(), ar.data.size() + read_past_buffer * 3 / 2, ar.expect_little_data() ? usz{4096} : usz{0x10'0000} })));
+		const usz new_size = std::min<usz>(read_limit, std::max<usz>({ ar.data.capacity(), ar.data.size() + read_past_buffer * 3 / 2, ar.expect_little_data() ? usz{4096} : usz{0x10'0000} }));
+
+		if (new_size < old_size)
+		{
+			// Read limit forbids further reads at this point
+			return true;
+		}
+
+		ar.data.resize(new_size);
 		ar.data.resize(this->read_at(ar, old_size + ar.data_offset, data ? const_cast<void*>(data) : ar.data.data() + old_size, ar.data.size() - old_size) + old_size);
 	}
 
@@ -611,11 +619,6 @@ void compressed_serialization_file_handler::stream_data_prepare_thread_op()
 			if (data.empty())
 			{
 				// Abort is requested, flush data and exit
-				if (!m_stream_data.empty())
-				{
-					stream.m_queued_data_to_write.push(std::move(m_stream_data));
-				}
-
 				stream.m_queued_data_to_write.push(std::vector<u8>());
 				return;
 			}
@@ -652,9 +655,13 @@ void compressed_serialization_file_handler::stream_data_prepare_thread_op()
 			}
 			while (m_zs.avail_out == 0 || m_zs.avail_in != 0);
 
+			if (m_errored)
+			{
+				return;
+			}
+
 			// Forward for file write
 			const usz queued_size = data.size();
-			ensure(buffer_offset);
 
 			const usz size_diff = buffer_offset - queued_size;
 			const usz new_val = m_pending_bytes.add_fetch(size_diff);
@@ -668,6 +675,16 @@ void compressed_serialization_file_handler::stream_data_prepare_thread_op()
 
 			// Ensure wait bit state has not changed by the update
 			ensure(~((new_val - size_diff) ^ new_val) & pending_data_wait_bit);
+
+			if (!buffer_offset)
+			{
+				if (m_pending_signal)
+				{
+					m_pending_bytes.notify_all();
+				}
+
+				continue;
+			}
 
 			m_stream_data.resize(buffer_offset);
 			stream.m_queued_data_to_write.push(std::move(m_stream_data));
@@ -739,12 +756,12 @@ usz compressed_serialization_file_handler::get_size(const utils::serial& ar, usz
 {
 	if (ar.is_writing())
 	{
-		return m_file->size();
+		return *m_file ? m_file->size() : 0;
 	}
 
 	const usz memory_available = ar.data_offset + ar.data.size();
 
-	if (memory_available >= recommended)
+	if (memory_available >= recommended || !*m_file)
 	{
 		// Avoid calling size() if possible
 		return memory_available;

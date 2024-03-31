@@ -11,6 +11,8 @@
 #include "SPUThread.h"
 #include "SPUAnalyser.h"
 #include "SPUInterpreter.h"
+#include "SPUDisAsm.h"
+#include <algorithm>
 #include <thread>
 #include <unordered_set>
 
@@ -30,26 +32,32 @@ const extern spu_decoder<spu_iflag> g_spu_iflag;
 #pragma warning(push, 0)
 #else
 #pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wall"
-#pragma GCC diagnostic ignored "-Wextra"
 #pragma GCC diagnostic ignored "-Wold-style-cast"
 #pragma GCC diagnostic ignored "-Wunused-parameter"
-#pragma GCC diagnostic ignored "-Wstrict-aliasing"
-#pragma GCC diagnostic ignored "-Weffc++"
 #pragma GCC diagnostic ignored "-Wmissing-noreturn"
 #endif
+#include <llvm/ADT/PostOrderIterator.h>
+#include <llvm/Analysis/PostDominators.h>
+#include <llvm/IR/InlineAsm.h>
+#include <llvm/IR/Verifier.h>
+#include <llvm/TargetParser/Host.h>
+#include <llvm/Transforms/Utils/BasicBlockUtils.h>
 #if LLVM_VERSION_MAJOR < 17
-#include "llvm/ADT/Triple.h"
+#include <llvm/IR/LegacyPassManager.h>
+#include <llvm/Transforms/Scalar.h>
+#include <llvm/Analysis/AliasAnalysis.h>
+#else
+#include <llvm/Analysis/CGSCCPassManager.h>
+#include <llvm/Analysis/LoopAnalysisManager.h>
+#include <llvm/IR/PassManager.h>
+#include <llvm/Passes/PassBuilder.h>
+#include <llvm/Transforms/Scalar/ADCE.h>
+#include <llvm/Transforms/Scalar/DeadStoreElimination.h>
+#include <llvm/Transforms/Scalar/EarlyCSE.h>
+#include <llvm/Transforms/Scalar/LICM.h>
+#include <llvm/Transforms/Scalar/LoopPassManager.h>
+#include <llvm/Transforms/Scalar/SimplifyCFG.h>
 #endif
-#include "llvm/TargetParser/Host.h"
-#include "llvm/IR/LegacyPassManager.h"
-#include "llvm/IR/Verifier.h"
-#include "llvm/IR/InlineAsm.h"
-#include "llvm/Transforms/Utils/BasicBlockUtils.h"
-#include "llvm/Transforms/Scalar.h"
-#include "llvm/Analysis/PostDominators.h"
-#include "llvm/Analysis/AliasAnalysis.h"
-#include "llvm/ADT/PostOrderIterator.h"
 #ifdef _MSC_VER
 #pragma warning(pop)
 #else
@@ -1050,7 +1058,7 @@ class spu_llvm_recompiler : public spu_recompiler_base, public cpu_translator
 		m_ir->SetInsertPoint(check);
 		update_pc(addr);
 
-		if (may_be_unsafe_for_savestate && std::none_of(std::begin(m_block->phi), std::end(m_block->phi), FN(!!x)))
+		if (may_be_unsafe_for_savestate && m_block && m_block->bb->preds.empty())
 		{
 			may_be_unsafe_for_savestate = false;
 		}
@@ -1114,6 +1122,7 @@ public:
 		}
 
 		const u32 start0 = _func.entry_point;
+		const usz func_size = _func.data.size();
 
 		const auto add_loc = m_spurt->add_empty(std::move(_func));
 
@@ -1137,9 +1146,11 @@ public:
 
 		std::string log;
 
+		bool add_to_file = false;
+
 		if (auto& cache = g_fxo->get<spu_cache>(); cache && g_cfg.core.spu_cache && !add_loc->cached.exchange(1))
 		{
-			cache.add(func);
+			add_to_file = true;
 		}
 
 		{
@@ -1901,8 +1912,10 @@ public:
 									auto si = llvm::cast<StoreInst>(m_ir->Insert(bs->clone()));
 									if (b2->store[i] == nullptr)
 									{
+										// Protect against backwards ordering now
 										b2->store[i] = si;
 										b2->store_context_last_id[i] = 0;
+										b2->store_context_first_id[i] = b2->store_context_ctr[i] + 1;
 
 										if (!std::count(block_q.begin() + bi, block_q.end(), b2))
 										{
@@ -2012,6 +2025,7 @@ public:
 			m_function_table->eraseFromParent();
 		}
 
+#if LLVM_VERSION_MAJOR < 17
 		// Initialize pass manager
 		legacy::FunctionPassManager pm(_module.get());
 
@@ -2019,16 +2033,42 @@ public:
 		pm.add(createEarlyCSEPass());
 		pm.add(createCFGSimplificationPass());
 		//pm.add(createNewGVNPass());
-#if LLVM_VERSION_MAJOR < 17
 		pm.add(createDeadStoreEliminationPass());
-#endif
 		pm.add(createLICMPass());
-#if LLVM_VERSION_MAJOR < 17
 		pm.add(createAggressiveDCEPass());
-#else
 		pm.add(createDeadCodeEliminationPass());
-#endif
 		//pm.add(createLintPass()); // Check
+#else
+
+		// Create the analysis managers.
+		// These must be declared in this order so that they are destroyed in the
+		// correct order due to inter-analysis-manager references.
+		LoopAnalysisManager lam;
+		FunctionAnalysisManager fam;
+		CGSCCAnalysisManager cgam;
+		ModuleAnalysisManager mam;
+
+		// Create the new pass manager builder.
+		// Take a look at the PassBuilder constructor parameters for more
+		// customization, e.g. specifying a TargetMachine or various debugging
+		// options.
+		PassBuilder pb;
+
+		// Register all the basic analyses with the managers.
+		pb.registerModuleAnalyses(mam);
+		pb.registerCGSCCAnalyses(cgam);
+		pb.registerFunctionAnalyses(fam);
+		pb.registerLoopAnalyses(lam);
+		pb.crossRegisterProxies(lam, fam, cgam, mam);
+
+		FunctionPassManager fpm;
+		// Basic optimizations
+		fpm.addPass(EarlyCSEPass(true));
+		fpm.addPass(SimplifyCFGPass());
+		fpm.addPass(DSEPass());
+		fpm.addPass(createFunctionToLoopPassAdaptor(LICMPass(LICMOptions()), true));
+		fpm.addPass(ADCEPass());
+#endif
 
 		for (auto& f : *m_module)
 		{
@@ -2038,7 +2078,11 @@ public:
 		for (const auto& func : m_functions)
 		{
 			const auto f = func.second.fn ? func.second.fn : func.second.chunk;
+#if LLVM_VERSION_MAJOR < 17
 			pm.run(*f);
+#else
+			fpm.run(*f, fam);
+#endif
 		}
 
 		// Clear context (TODO)
@@ -2095,6 +2139,14 @@ public:
 		// Rebuild trampoline if necessary
 		if (!m_spurt->rebuild_ubertrampoline(func.data[0]))
 		{
+			if (auto& cache = g_fxo->get<spu_cache>())
+			{
+				if (add_to_file)
+				{
+					cache.add(func);
+				}
+			}
+
 			return nullptr;
 		}
 
@@ -2115,9 +2167,14 @@ public:
 		asm("DSB ISH");
 #endif
 
-		if (g_fxo->get<spu_cache>().operator bool())
+		if (auto& cache = g_fxo->get<spu_cache>())
 		{
-			spu_log.success("New block compiled successfully");
+			if (add_to_file)
+			{
+				cache.add(func);
+			}
+
+			spu_log.success("New SPU block compiled successfully (size=%u)", func_size);
 		}
 
 		return fn;
@@ -2489,24 +2546,9 @@ public:
 		m_function_table->setInitializer(ConstantArray::get(ArrayType::get(if_type->getPointerTo(), 1ull << m_interp_magn), iptrs));
 		m_function_table = nullptr;
 
-		// Initialize pass manager
-		legacy::FunctionPassManager pm(_module.get());
-
-		// Basic optimizations
-		pm.add(createEarlyCSEPass());
-		pm.add(createCFGSimplificationPass());
-#if LLVM_VERSION_MAJOR < 17
-		pm.add(createDeadStoreEliminationPass());
-		pm.add(createAggressiveDCEPass());
-#else
-		pm.add(createDeadCodeEliminationPass());
-#endif
-		//pm.add(createLintPass());
-
 		for (auto& f : *_module)
 		{
 			replace_intrinsics(f);
-			//pm.run(f);
 		}
 
 		std::string log;
@@ -2639,13 +2681,13 @@ public:
 		}
 
 		update_pc();
+		ensure_gpr_stores();
 		call("spu_syscall", &exec_stop, m_thread, m_ir->getInt32(op.opcode & 0x3fff));
 
 		if (g_cfg.core.spu_block_size == spu_block_size_type::safe)
 		{
 			m_block->block_end = m_ir->GetInsertBlock();
 			update_pc(m_pos + 4);
-			ensure_gpr_stores();
 			tail_chunk(m_dispatch);
 			return;
 		}
@@ -2908,6 +2950,40 @@ public:
 		switch (op.ra)
 		{
 		case SPU_WrOutMbox:
+		case SPU_WrOutIntrMbox:
+		case SPU_RdSigNotify1:
+		case SPU_RdSigNotify2:
+		case SPU_RdInMbox:
+		case SPU_RdEventStat:
+		{
+			bool loop_is_likely = op.ra == SPU_RdSigNotify1 || op.ra == SPU_RdSigNotify2;
+
+			for (u32 block_start : m_block->bb->preds)
+			{
+				if (block_start >= m_pos)
+				{
+					loop_is_likely = true;
+					break;
+				}
+			}
+
+			if (loop_is_likely || g_cfg.savestate.compatible_mode)
+			{
+				ensure_gpr_stores();
+				check_state(m_pos, false);
+			}
+
+			break;
+		}
+		default:
+		{
+			break;
+		}
+		}
+
+		switch (op.ra)
+		{
+		case SPU_WrOutMbox:
 		{
 			res.value = get_rchcnt(::offset32(&spu_thread::ch_out_mbox), true);
 			break;
@@ -3031,7 +3107,7 @@ public:
 	{
 		if (!_spu->process_mfc_cmd() || _spu->state & cpu_flag::again)
 		{
-			spu_runtime::g_escape(_spu);
+			fmt::throw_exception("exec_mfc_cmd(): Should not abort!");
 		}
 
 		static_cast<void>(_spu->test_stopped());

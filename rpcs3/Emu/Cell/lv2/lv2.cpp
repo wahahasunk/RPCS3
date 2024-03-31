@@ -1446,16 +1446,28 @@ bool lv2_obj::sleep_unlocked(cpu_thread& thread, u64 timeout, u64 current_time)
 
 	auto on_to_sleep_update = [&]()
 	{
-		std::string out = fmt::format("Threads (%d):", g_to_sleep.size());
-		for (auto thread : g_to_sleep)
+		if (g_to_sleep.size() > 5u)
 		{
-			fmt::append(out, " 0x%x,", thread->id);
+			ppu_log.warning("Threads (%d)", g_to_sleep.size());
 		}
-
-		ppu_log.warning("%s", out);
-
-		if (g_to_sleep.empty())
+		else if (!g_to_sleep.empty())
 		{
+			// In case there is a deadlock (PPU threads not sleeping)
+			// Print-out their IDs for further inspection (focus at 5 at max for now to avoid log spam)
+			std::string out = fmt::format("Threads (%d):", g_to_sleep.size());
+			for (auto thread : g_to_sleep)
+			{
+				fmt::append(out, " 0x%x,", thread->id);
+			}
+
+			out.resize(out.size() - 1);
+
+			ppu_log.warning("%s", out);
+		}
+		else
+		{
+			ppu_log.warning("Final Thread");
+
 			// All threads are ready, wake threads
 			Emu.CallFromMainThread([]
 			{
@@ -1781,12 +1793,14 @@ bool lv2_obj::awake_unlocked(cpu_thread* cpu, s32 prio)
 	{
 		if (current_ppu->prio.load().prio > lowest_new_priority)
 		{
+			const bool is_create_thread = current_ppu->gpr[11] == 0x35;
+
 			// When not being set to All timers - activate only for sys_ppu_thread_start
-			if (current_ppu->gpr[11] == 0x35 || g_cfg.core.sleep_timers_accuracy == sleep_timers_accuracy_level::_all_timers)
+			if (is_create_thread || g_cfg.core.sleep_timers_accuracy == sleep_timers_accuracy_level::_all_timers)
 			{
 				if (!current_ppu->state.test_and_set(cpu_flag::yield) || current_ppu->hw_sleep_time != 0)
 				{
-					current_ppu->hw_sleep_time += 35; // Seems like 35us after extensive testing
+					current_ppu->hw_sleep_time += (is_create_thread ? 51 : 35);
 				}
 				else
 				{
@@ -1944,7 +1958,7 @@ void lv2_obj::make_scheduler_ready()
 	lv2_obj::awake_all();
 }
 
-ppu_thread_status lv2_obj::ppu_state(ppu_thread* ppu, bool lock_idm, bool lock_lv2)
+std::pair<ppu_thread_status, u32> lv2_obj::ppu_state(ppu_thread* ppu, bool lock_idm, bool lock_lv2)
 {
 	std::optional<reader_lock> opt_lock[2];
 
@@ -1955,13 +1969,13 @@ ppu_thread_status lv2_obj::ppu_state(ppu_thread* ppu, bool lock_idm, bool lock_l
 
 	if (!Emu.IsReady() ? ppu->state.all_of(cpu_flag::stop) : ppu->stop_flag_removal_protection)
 	{
-		return PPU_THREAD_STATUS_IDLE;
+		return { PPU_THREAD_STATUS_IDLE, 0};
 	}
 
 	switch (ppu->joiner)
 	{
-	case ppu_join_status::zombie: return PPU_THREAD_STATUS_ZOMBIE;
-	case ppu_join_status::exited: return PPU_THREAD_STATUS_DELETED;
+	case ppu_join_status::zombie: return { PPU_THREAD_STATUS_ZOMBIE, 0};
+	case ppu_join_status::exited: return { PPU_THREAD_STATUS_DELETED, 0};
 	default: break;
 	}
 
@@ -1986,18 +2000,18 @@ ppu_thread_status lv2_obj::ppu_state(ppu_thread* ppu, bool lock_idm, bool lock_l
 	{
 		if (!ppu->interrupt_thread_executing)
 		{
-			return PPU_THREAD_STATUS_STOP;
+			return { PPU_THREAD_STATUS_STOP, 0};
 		}
 
-		return PPU_THREAD_STATUS_SLEEP;
+		return { PPU_THREAD_STATUS_SLEEP, 0 };
 	}
 
 	if (pos >= g_cfg.core.ppu_threads + 0u)
 	{
-		return PPU_THREAD_STATUS_RUNNABLE;
+		return { PPU_THREAD_STATUS_RUNNABLE, pos };
 	}
 
-	return PPU_THREAD_STATUS_ONPROC;
+	return { PPU_THREAD_STATUS_ONPROC, pos};
 }
 
 void lv2_obj::set_future_sleep(cpu_thread* cpu)
