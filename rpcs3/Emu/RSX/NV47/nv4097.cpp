@@ -384,7 +384,7 @@ namespace rsx
 
 		void set_face_property(context* ctx, u32 reg, u32 arg)
 		{
-			if (reg == REGS(ctx)->latch)
+			if (arg == REGS(ctx)->latch)
 			{
 				return;
 			}
@@ -412,7 +412,7 @@ namespace rsx
 
 		void set_blend_equation(context* ctx, u32 reg, u32 arg)
 		{
-			if (reg == REGS(ctx)->latch)
+			if (arg == REGS(ctx)->latch)
 			{
 				return;
 			}
@@ -430,7 +430,7 @@ namespace rsx
 
 		void set_blend_factor(context* ctx, u32 reg, u32 arg)
 		{
-			if (reg == REGS(ctx)->latch)
+			if (arg == REGS(ctx)->latch)
 			{
 				return;
 			}
