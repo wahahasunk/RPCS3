@@ -1032,7 +1032,7 @@ namespace rsx
 				const u64 post_event_time = start_time + (local_vblank_count + 1) * vblank_period / vblank_rate;
 
 				// Calculate time remaining to that time (0 if we passed it)
-				const u64 wait_for = current >= post_event_time ? 0 : (post_event_time - current)/2;
+				const u64 wait_for = current >= post_event_time ? 0 : (post_event_time - current);
 
 #ifdef __linux__
 				const u64 wait_sleep = wait_for;
@@ -1426,8 +1426,8 @@ namespace rsx
 		{
 			// NOTE: This has to be executed immediately
 			// Delaying this operation can cause desync due to the delay in firing the flip event
-			handle_emu_flip(async_flip_buffer);			
-		}
+				handle_emu_flip(async_flip_buffer);
+		}			
 
 		if (state != FIFO::state::lock_wait)
 		{
@@ -3739,27 +3739,26 @@ namespace rsx
 
 	bool thread::request_emu_flip(u32 buffer)
 	{
-		if (is_current_thread()) // requested through command buffer
-		{
-			// NOTE: The flip will clear any queued flip requests
-			handle_emu_flip(buffer);
-		}
-		else // requested 'manually' through ppu syscall
-		{
-			handle_emu_flip(buffer);
-
-			async_flip_buffer = buffer;
-			async_flip_requested |= flip_request::emu_requested;
-
-			m_eng_interrupt_mask |= rsx::display_interrupt;
-
-			if (state & cpu_flag::exit)
+			if (is_current_thread()) // requested through command buffer
 			{
-				// Resubmit possibly-ignored flip on savestate load
-				return false;
+				// NOTE: The flip will clear any queued flip requests
+				handle_emu_flip(buffer);
 			}
-		}
+			else // requested 'manually' through ppu syscall
+			{
+				handle_emu_flip(buffer);
+				async_flip_buffer = buffer;
+				async_flip_requested |= flip_request::emu_requested;
 
+				m_eng_interrupt_mask |= rsx::display_interrupt;
+
+				if (state & cpu_flag::exit)
+				{
+					// Resubmit possibly-ignored flip on savestate load
+					return false;
+				}
+			}
+		
 		return true;
 	}
 
@@ -3768,24 +3767,24 @@ namespace rsx
 		if (m_queued_flip.in_progress)
 		{
 			// Rescursion not allowed!
-			//m_queued_flip.in_progress = false;
-			//on_frame_end(buffer, true);
-			//std::this_thread::yield();
-			//execute_nop_draw();
+			// m_queued_flip.in_progress = false;
+			// on_frame_end(buffer, true);
+			// std::this_thread::yield();
+			// execute_nop_draw();
 			return;
 		}
 
 		if (!m_queued_flip.pop(buffer))
 		{
 			// Frame was not queued before flipping
-			on_frame_end(buffer, true);			
-			ensure(m_queued_flip.pop(buffer));
-			//std::this_thread::yield();
-			//execute_nop_draw();
-
+			// Frame was not queued before flipping
+			// on_frame_end(buffer, true);
+			m_queued_flip.stats = m_frame_stats;
+			m_queued_flip.push(buffer);
+			m_queued_flip.pop(buffer);
+			// std::this_thread::yield();
+			// execute_nop_draw();
 		}
-
-
 		double limit = 0.;
 		const auto frame_limit = g_disable_frame_limit ? frame_limit_type::none : g_cfg.video.frame_limit;
 
@@ -3821,7 +3820,7 @@ namespace rsx
 					lv2_obj::wait_timeout(delay_us, nullptr, false);
 					//std::this_thread::sleep_for((delay_us * 1ms / 1000*0.5));
 					performance_counters.idle_time += delay_us;
-				}
+				}				
 			}
 
 			target_rsx_flip_time = std::max(time, target_rsx_flip_time) + needed_us;
@@ -3842,7 +3841,7 @@ namespace rsx
 			{
 				// Not yet signaled, handle it later
 				async_flip_requested |= flip_request::emu_requested;
-				async_flip_buffer = buffer;				
+				async_flip_buffer = buffer;
 				return;
 			}
 
@@ -3851,20 +3850,26 @@ namespace rsx
 		else
 		{
 			flip_notification_count = 1;
-		}
+		}				
 
-		int_flip_index += flip_notification_count;
+			int_flip_index += flip_notification_count;
 
-		current_display_buffer = buffer;
-		m_queued_flip.emu_flip = true;
-		m_queued_flip.in_progress = true;
-		m_queued_flip.skip_frame |= g_cfg.video.disable_video_output && !g_cfg.video.perf_overlay.perf_overlay_enabled;
+			current_display_buffer = buffer;
+			m_queued_flip.emu_flip = true;
+			m_queued_flip.in_progress = true;
+			m_queued_flip.skip_frame |= g_cfg.video.disable_video_output && !g_cfg.video.perf_overlay.perf_overlay_enabled;
 
-		flip(m_queued_flip);
+			flip(m_queued_flip);
 
-		last_guest_flip_timestamp = rsx::uclock() - 1000000;
-		flip_status = CELL_GCM_DISPLAY_FLIP_STATUS_DONE;
-		m_queued_flip.in_progress = false;
+			last_guest_flip_timestamp = rsx::uclock() - 1000000;
+			flip_status = CELL_GCM_DISPLAY_FLIP_STATUS_DONE;
+			m_queued_flip.in_progress = false;
+			/*i++;
+			if (i >= 0)
+			{
+			}
+			if (i >= 1)
+				i = -2;*/		
 
 		while (flip_notification_count--)
 		{
@@ -3879,8 +3884,8 @@ namespace rsx
 				}
 
 				continue;
-			}
-
+	}
+		
 			if (auto ptr = flip_handler)
 			{
 				intr_thread->cmd_list

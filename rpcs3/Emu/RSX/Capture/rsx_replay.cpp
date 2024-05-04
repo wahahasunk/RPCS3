@@ -231,7 +231,7 @@ namespace rsx
 			}
 
 			// Check if the captured application used syscall instead of a gcm command to flip
-			if (render->int_flip_index == last_flip)
+			if (render->int_flip_index > 2)
 			{
 				// Capture did not include a display flip, flip manually
 				render->request_emu_flip(1u);

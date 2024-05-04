@@ -48,8 +48,7 @@ namespace rsx
 			{
 				return false;
 			}
-
-			do
+			else
 			{
 				const auto index = buffer_queue.front();
 				buffer_queue.pop_front();
@@ -59,7 +58,8 @@ namespace rsx
 					buffer = _buffer;
 					return true;
 				}
-			} while (!buffer_queue.empty());
+			}
+
 
 			// Need to observe this happening in the wild
 			rsx_log.error("Display queue was discarded while not empty!");

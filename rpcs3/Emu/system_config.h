@@ -46,6 +46,7 @@ struct cfg_root : cfg::node
 		cfg::_bool spu_accurate_reservations{ this, "Accurate SPU Reservations", true };
 		cfg::_bool mgs4_FNMS{this, "MGS4 FNMS", false};
 		cfg::_bool mgs4_FM{this, "MGS4 FM", false};
+		cfg::_bool appro{this, "Approximate xfloat", false};
 		cfg::_bool accurate_cache_line_stores{ this, "Accurate Cache Line Stores", false };
 		cfg::_bool rsx_accurate_res_access{this, "Accurate RSX reservation access", false, true};
 
@@ -176,7 +177,7 @@ struct cfg_root : cfg::node
 		cfg::_int<0, 16> shader_compiler_threads_count{ this, "Shader Compiler Threads", 0 };
 		cfg::_int<0, 30000000> driver_recovery_timeout{ this, "Driver Recovery Timeout", 1000000, true };
 		cfg::uint<0, 16667> driver_wakeup_delay{ this, "Driver Wake-Up Delay", 1, true };
-		cfg::_int<1, 3000> vblank_rate{ this, "Vblank Rate", 60, true }; // Changing this from 60 may affect game speed in unexpected ways
+		cfg::_int<1, 6000> vblank_rate{ this, "Vblank Rate", 60, true }; // Changing this from 60 may affect game speed in unexpected ways
 		cfg::_bool vblank_ntsc{ this, "Vblank NTSC Fixup", false, true };
 		cfg::_bool decr_memory_layout{ this, "DECR memory layout", false}; // Force enable increased allowed main memory range as DECR console
 		cfg::_bool host_label_synchronization{ this, "Allow Host GPU Labels", false };

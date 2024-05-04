@@ -990,7 +990,7 @@ class spu_llvm_recompiler : public spu_recompiler_base, public cpu_translator
 			{
 				r.value = m_ir->CreateZExtOrTrunc(r.value, get_type<T>()->getScalarType());
 			}
-
+			 
 			if (r.is_vector)
 			{
 				r.value = m_ir->CreateVectorSplat(r.is_vector, r.value);
@@ -5670,14 +5670,8 @@ public:
 			const auto a = value<f32[4]>(ci->getOperand(0));
 			const auto b = value<f32[4]>(ci->getOperand(1));
 
-			if (g_cfg.core.mgs4_FM)
-			{
-				const auto ca = clamp_smax(a);
-				const auto cb = clamp_smax(b);
-				return eval(ca * cb);
-			}
 
-			if (g_cfg.core.spu_xfloat_accuracy == xfloat_accuracy::approximate)
+			if (g_cfg.core.spu_xfloat_accuracy == xfloat_accuracy::approximate && !g_cfg.core.mgs4_FM)
 			{
 				if (a.value == b.value)
 				{
@@ -5687,6 +5681,12 @@ public:
 				const auto ma = sext<s32[4]>(fcmp_uno(a != fsplat<f32[4]>(0.)));
 				const auto mb = sext<s32[4]>(fcmp_uno(b != fsplat<f32[4]>(0.)));
 				return eval(bitcast<f32[4]>(bitcast<s32[4]>(a * b) & ma & mb));
+			}
+			else if (g_cfg.core.mgs4_FM)
+			{
+				const auto ca = clamp_smax(a);
+				const auto cb = clamp_smax(b);
+				return eval(ca * cb);
 			}
 			else
 			{
@@ -6051,15 +6051,17 @@ public:
 			set_vr(op.rt4, fma32x4(eval(-(ca)), (cb), get_vr<f32[4]>(op.rc)));
 			return;
 		}
-
-		register_intrinsic("spu_fnms", [&](llvm::CallInst* ci)
+		if (g_cfg.core.spu_xfloat_accuracy != xfloat_accuracy::accurate && !g_cfg.core.mgs4_FNMS)
 		{
-			const auto a = value<f32[4]>(ci->getOperand(0));
-			const auto b = value<f32[4]>(ci->getOperand(1));
-			const auto c = value<f32[4]>(ci->getOperand(2));
+			register_intrinsic("spu_fnms", [&](llvm::CallInst* ci)
+				{
+					const auto a = value<f32[4]>(ci->getOperand(0));
+					const auto b = value<f32[4]>(ci->getOperand(1));
+					const auto c = value<f32[4]>(ci->getOperand(2));
 
-			return fma32x4(eval(-clamp_smax(a)), clamp_smax(b), c);
-		});
+					return fma32x4(eval(-clamp_smax(a)), clamp_smax(b), c);
+				});
+		}
 
 		set_vr(op.rt4, fnms(get_vr<f32[4]>(op.ra), get_vr<f32[4]>(op.rb), get_vr<f32[4]>(op.rc)));
 	}
@@ -6092,7 +6094,7 @@ public:
 			const auto b = value<f32[4]>(ci->getOperand(1));
 			const auto c = value<f32[4]>(ci->getOperand(2));
 
-			if (g_cfg.core.spu_xfloat_accuracy == xfloat_accuracy::approximate)
+			if (g_cfg.core.spu_xfloat_accuracy == xfloat_accuracy::approximate || g_cfg.core.appro)
 			{
 				const auto ma = sext<s32[4]>(fcmp_uno(a != fsplat<f32[4]>(0.)));
 				const auto mb = sext<s32[4]>(fcmp_uno(b != fsplat<f32[4]>(0.)));
@@ -6100,7 +6102,7 @@ public:
 				const auto cb = bitcast<f32[4]>(bitcast<s32[4]>(b) & ma);
 				return fma32x4(eval(ca), eval(cb), c);
 			}
-			else
+			else if (g_cfg.core.spu_xfloat_accuracy == xfloat_accuracy::relaxed && !g_cfg.core.appro)
 			{
 				return fma32x4(a, b, c);
 			}
@@ -6381,102 +6383,95 @@ public:
 	void FI(spu_opcode_t op)
 	{
 		register_intrinsic("spu_fi", [&](llvm::CallInst* ci)
-		{
-			// TODO: adjustment for denormals(for accurate xfloat only?)
-			const auto a = bitcast<u32[4]>(value<f32[4]>(ci->getOperand(0)));
-			const auto b = bitcast<u32[4]>(value<f32[4]>(ci->getOperand(1)));
+			{
+				// TODO: adjustment for denormals(for accurate xfloat only?)
+				const auto a = bitcast<u32[4]>(value<f32[4]>(ci->getOperand(0)));
+				const auto b = bitcast<u32[4]>(value<f32[4]>(ci->getOperand(1)));
 
-			const auto base = (b & 0x007ffc00u) << 9; // Base fraction
-			const auto ymul = (b & 0x3ff) * (a & 0x7ffff); // Step fraction * Y fraction (fixed point at 2^-32)
-			const auto comparison = (ymul > base); // Should exponent be adjusted?
-			const auto bnew = (base - ymul) >> (zext<u32[4]>(comparison) ^ 9); // Shift one less bit if exponent is adjusted
-			const auto base_result = (b & 0xff800000u) | (bnew & ~0xff800000u); // Inject old sign and exponent
-			const auto adjustment = bitcast<u32[4]>(sext<s32[4]>(comparison)) & (1 << 23); // exponent adjustement for negative bnew
-			return bitcast<f32[4]>(base_result - adjustment);
-		});
+				const auto base = (b & 0x007ffc00u) << 9;                                      // Base fraction
+				const auto ymul = (b & 0x3ff) * (a & 0x7ffff);                                 // Step fraction * Y fraction (fixed point at 2^-32)
+				const auto comparison = (ymul > base);                                         // Should exponent be adjusted?
+				const auto bnew = (base - ymul) >> (zext<u32[4]>(comparison) ^ 9);             // Shift one less bit if exponent is adjusted
+				const auto base_result = (b & 0xff800000u) | (bnew & ~0xff800000u);            // Inject old sign and exponent
+				const auto adjustment = bitcast<u32[4]>(sext<s32[4]>(comparison)) & (1 << 23); // exponent adjustement for negative bnew
+				return bitcast<f32[4]>(base_result - adjustment);
+			});
 
 		const auto [a, b] = get_vrs<f32[4]>(op.ra, op.rb);
 
-		switch (g_cfg.core.spu_xfloat_accuracy)
-		{
-		case xfloat_accuracy::approximate:
+		if (g_cfg.core.spu_xfloat_accuracy == xfloat_accuracy::approximate || g_cfg.core.appro)
 		{
 			// For approximate, create a pattern but do not optimize yet
 			register_intrinsic("spu_re", [&](llvm::CallInst* ci)
-			{
-				const auto a = bitcast<u32[4]>(value<f32[4]>(ci->getOperand(0)));
-				const auto a_fraction = (a >> splat<u32[4]>(18)) & splat<u32[4]>(0x1F);
-				const auto a_exponent = (a >> splat<u32[4]>(23)) & splat<u32[4]>(0xFF);
-				const auto a_sign = (a & splat<u32[4]>(0x80000000));
-				value_t<u32[4]> b = eval(splat<u32[4]>(0));
-
-				for (u32 i = 0; i < 4; i++)
 				{
-					const auto eval_fraction = eval(extract(a_fraction, i));
-					const auto eval_exponent = eval(extract(a_exponent, i));
-					const auto eval_sign = eval(extract(a_sign, i));
-					value_t<u32> r_fraction = load_const<u32>(m_spu_frest_fraction_lut, eval_fraction);
-					value_t<u32> r_exponent = load_const<u32>(m_spu_frest_exponent_lut, eval_exponent);
-					b = eval(insert(b, i, eval(r_fraction | eval_sign | r_exponent)));
-				}
+					const auto a = bitcast<u32[4]>(value<f32[4]>(ci->getOperand(0)));
+					const auto a_fraction = (a >> splat<u32[4]>(18)) & splat<u32[4]>(0x1F);
+					const auto a_exponent = (a >> splat<u32[4]>(23)) & splat<u32[4]>(0xFF);
+					const auto a_sign = (a & splat<u32[4]>(0x80000000));
+					value_t<u32[4]> b = eval(splat<u32[4]>(0));
 
-				const auto base = (b & 0x007ffc00u) << 9; // Base fraction
-				const auto ymul = (b & 0x3ff) * (a & 0x7ffff); // Step fraction * Y fraction (fixed point at 2^-32)
-				const auto comparison = (ymul > base); // Should exponent be adjusted?
-				const auto bnew = (base - ymul) >> (zext<u32[4]>(comparison) ^ 9); // Shift one less bit if exponent is adjusted
-				const auto base_result = (b & 0xff800000u) | (bnew & ~0xff800000u); // Inject old sign and exponent
-				const auto adjustment = bitcast<u32[4]>(sext<s32[4]>(comparison)) & (1 << 23); // exponent adjustement for negative bnew
-				return bitcast<f32[4]>(base_result - adjustment);
-			});
+					for (u32 i = 0; i < 4; i++)
+					{
+						const auto eval_fraction = eval(extract(a_fraction, i));
+						const auto eval_exponent = eval(extract(a_exponent, i));
+						const auto eval_sign = eval(extract(a_sign, i));
+						value_t<u32> r_fraction = load_const<u32>(m_spu_frest_fraction_lut, eval_fraction);
+						value_t<u32> r_exponent = load_const<u32>(m_spu_frest_exponent_lut, eval_exponent);
+						b = eval(insert(b, i, eval(r_fraction | eval_sign | r_exponent)));
+					}
+
+					const auto base = (b & 0x007ffc00u) << 9;                                      // Base fraction
+					const auto ymul = (b & 0x3ff) * (a & 0x7ffff);                                 // Step fraction * Y fraction (fixed point at 2^-32)
+					const auto comparison = (ymul > base);                                         // Should exponent be adjusted?
+					const auto bnew = (base - ymul) >> (zext<u32[4]>(comparison) ^ 9);             // Shift one less bit if exponent is adjusted
+					const auto base_result = (b & 0xff800000u) | (bnew & ~0xff800000u);            // Inject old sign and exponent
+					const auto adjustment = bitcast<u32[4]>(sext<s32[4]>(comparison)) & (1 << 23); // exponent adjustement for negative bnew
+					return bitcast<f32[4]>(base_result - adjustment);
+				});
 
 			register_intrinsic("spu_rsqrte", [&](llvm::CallInst* ci)
-			{
-				const auto a = bitcast<u32[4]>(value<f32[4]>(ci->getOperand(0)));
-				const auto a_fraction = (a >> splat<u32[4]>(18)) & splat<u32[4]>(0x3F);
-				const auto a_exponent = (a >> splat<u32[4]>(23)) & splat<u32[4]>(0xFF);
-				value_t<u32[4]> b = eval(splat<u32[4]>(0));
-
-				for (u32 i = 0; i < 4; i++)
 				{
-					const auto eval_fraction = eval(extract(a_fraction, i));
-					const auto eval_exponent = eval(extract(a_exponent, i));
+					const auto a = bitcast<u32[4]>(value<f32[4]>(ci->getOperand(0)));
+					const auto a_fraction = (a >> splat<u32[4]>(18)) & splat<u32[4]>(0x3F);
+					const auto a_exponent = (a >> splat<u32[4]>(23)) & splat<u32[4]>(0xFF);
+					value_t<u32[4]> b = eval(splat<u32[4]>(0));
 
-					value_t<u32> r_fraction = load_const<u32>(m_spu_frsqest_fraction_lut, eval_fraction);
-					value_t<u32> r_exponent = load_const<u32>(m_spu_frsqest_exponent_lut, eval_exponent);
+					for (u32 i = 0; i < 4; i++)
+					{
+						const auto eval_fraction = eval(extract(a_fraction, i));
+						const auto eval_exponent = eval(extract(a_exponent, i));
 
-					b = eval(insert(b, i, eval(r_fraction | r_exponent)));
-				}
+						value_t<u32> r_fraction = load_const<u32>(m_spu_frsqest_fraction_lut, eval_fraction);
+						value_t<u32> r_exponent = load_const<u32>(m_spu_frsqest_exponent_lut, eval_exponent);
 
-				const auto base = (b & 0x007ffc00u) << 9; // Base fraction
-				const auto ymul = (b & 0x3ff) * (a & 0x7ffff); // Step fraction * Y fraction (fixed point at 2^-32)
-				const auto comparison = (ymul > base); // Should exponent be adjusted?
-				const auto bnew = (base - ymul) >> (zext<u32[4]>(comparison) ^ 9); // Shift one less bit if exponent is adjusted
-				const auto base_result = (b & 0xff800000u) | (bnew & ~0xff800000u); // Inject old sign and exponent
-				const auto adjustment = bitcast<u32[4]>(sext<s32[4]>(comparison)) & (1 << 23); // exponent adjustement for negative bnew
-				return bitcast<f32[4]>(base_result - adjustment);
-			});
-			break;
+						b = eval(insert(b, i, eval(r_fraction | r_exponent)));
+					}
+
+					const auto base = (b & 0x007ffc00u) << 9;                                      // Base fraction
+					const auto ymul = (b & 0x3ff) * (a & 0x7ffff);                                 // Step fraction * Y fraction (fixed point at 2^-32)
+					const auto comparison = (ymul > base);                                         // Should exponent be adjusted?
+					const auto bnew = (base - ymul) >> (zext<u32[4]>(comparison) ^ 9);             // Shift one less bit if exponent is adjusted
+					const auto base_result = (b & 0xff800000u) | (bnew & ~0xff800000u);            // Inject old sign and exponent
+					const auto adjustment = bitcast<u32[4]>(sext<s32[4]>(comparison)) & (1 << 23); // exponent adjustement for negative bnew
+					return bitcast<f32[4]>(base_result - adjustment);
+				});
 		}
-		case xfloat_accuracy::relaxed:
+		if (g_cfg.core.spu_xfloat_accuracy == xfloat_accuracy::relaxed && !g_cfg.core.appro)
 		{
 			// For relaxed, agressively optimize and use intrinsics, those make the results vary per cpu
 			register_intrinsic("spu_re", [&](llvm::CallInst* ci)
-			{
-				const auto a = value<f32[4]>(ci->getOperand(0));
-				return fre(a);
-			});
+				{
+					const auto a = value<f32[4]>(ci->getOperand(0));
+					return fre(a);
+				});
 
 			register_intrinsic("spu_rsqrte", [&](llvm::CallInst* ci)
-			{
-				const auto a = value<f32[4]>(ci->getOperand(0));
-				return frsqe(a);
-			});
-			break;
+				{
+					const auto a = value<f32[4]>(ci->getOperand(0));
+					return frsqe(a);
+				});
 		}
-		default:
-			break;
-		}
-
+	
 		// Do not pattern match for accurate
 		if(g_cfg.core.spu_xfloat_accuracy == xfloat_accuracy::approximate || g_cfg.core.spu_xfloat_accuracy == xfloat_accuracy::relaxed)
 		{

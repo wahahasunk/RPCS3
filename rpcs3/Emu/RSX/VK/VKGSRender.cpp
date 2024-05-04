@@ -954,9 +954,13 @@ VKGSRender::~VKGSRender()
 	if (m_current_frame == &m_aux_frame_context)
 	{
 		// Return resources back to the owner
-		m_current_frame = &frame_context_storage[m_current_queue_index];
-		m_current_frame->swap_storage(m_aux_frame_context);
-		m_current_frame->grab_resources(m_aux_frame_context);
+		m_current_frame = &frame_context_storage[0];
+		m_current_queue_index = (m_current_queue_index + 1) % VK_MAX_ASYNC_FRAMES;
+		vk::remove_unused_framebuffers();
+		m_current_frame->swap_storage(frame_context_storage[1]);
+		m_current_frame->grab_resources(frame_context_storage[1]);
+		//m_current_frame->swap_storage(m_aux_frame_context);
+		//m_current_frame->grab_resources(m_aux_frame_context);
 	}
 
 	m_aux_frame_context.buffer_views_to_clean.clear();
@@ -1335,10 +1339,11 @@ void VKGSRender::check_heap_status(u32 flags)
 		vk::frame_context_t *target_frame = nullptr;
 		if (!m_queued_frames.empty())
 		{
-			if (m_current_frame != &m_aux_frame_context)
+			/*			if (m_current_frame != &m_aux_frame_context)
 			{
 				target_frame = m_queued_frames.front();
-			}
+			}*/
+			target_frame = m_queued_frames.front();//我把它弄出来了
 		}
 
 		if (target_frame == nullptr)

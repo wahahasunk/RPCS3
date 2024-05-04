@@ -1802,12 +1802,12 @@ bool lv2_obj::awake_unlocked(cpu_thread* cpu, s32 prio)
 				{
 					current_ppu->hw_sleep_time += (is_create_thread ? 51 : 35);
 				}
-				else
-				{
-					current_ppu->hw_sleep_time = 30000; // In addition to another flag's use (TODO: Refactor and clean this)
-				}
+			else
+			{
+				current_ppu->hw_sleep_time = 30000; // In addition to another flag's use (TODO: Refactor and clean this)
 			}
 		}
+	}
 	}
 
 	return changed_queue;

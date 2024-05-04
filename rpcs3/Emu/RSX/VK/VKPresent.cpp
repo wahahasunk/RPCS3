@@ -149,7 +149,7 @@ void VKGSRender::advance_queued_frames()
 	m_texture_cache.on_frame_end();
 	m_samplers_dirty.store(true);
 
-	vk::remove_unused_framebuffers();
+	vk::remove_unused_framebuffers();//重点关注
 
 	m_vertex_cache->purge();
 	m_current_frame->tag_frame_end(m_attrib_ring_info.get_current_put_pos_minus_one(),
@@ -164,7 +164,7 @@ void VKGSRender::advance_queued_frames()
 		m_raster_env_ring_info.get_current_put_pos_minus_one());
 
 	m_queued_frames.push_back(m_current_frame);
-	ensure(m_queued_frames.size() <= VK_MAX_ASYNC_FRAMES);
+	m_queued_frames.size() == VK_MAX_ASYNC_FRAMES;
 
 	m_current_queue_index = (m_current_queue_index + 1) % VK_MAX_ASYNC_FRAMES;
 	m_current_frame = &frame_context_storage[m_current_queue_index];
@@ -434,8 +434,8 @@ void VKGSRender::flip(const rsx::display_flip_info_t& info)
 
 	if (m_current_frame == &m_aux_frame_context)
 	{
-		m_current_frame = &frame_context_storage[m_current_queue_index];
-		if (m_current_frame->swap_command_buffer)
+		m_current_frame = &frame_context_storage[0];
+/*		if (m_current_frame->swap_command_buffer)
 		{
 			// Its possible this flip request is triggered by overlays and the flip queue is in undefined state
 			frame_context_cleanup(m_current_frame);
@@ -443,9 +443,10 @@ void VKGSRender::flip(const rsx::display_flip_info_t& info)
 
 		// Swap aux storage and current frame; aux storage should always be ready for use at all times
 		m_current_frame->swap_storage(m_aux_frame_context);
-		m_current_frame->grab_resources(m_aux_frame_context);
+		m_current_frame->grab_resources(m_aux_frame_context);*/
 	}
-	else if (m_current_frame->swap_command_buffer)
+	    //else
+	if (m_current_frame != &m_aux_frame_context && m_current_frame->swap_command_buffer)
 	{
 		if (info.stats.draw_calls > 0)
 		{
@@ -555,7 +556,7 @@ void VKGSRender::flip(const rsx::display_flip_info_t& info)
 	ensure(m_current_frame->present_image == umax);
 	ensure(m_current_frame->swap_command_buffer == nullptr);
 
-	u64 timeout = m_swapchain->get_swap_image_count() <= VK_MAX_ASYNC_FRAMES? 0ull: 100000000ull;
+	u64 timeout = m_swapchain->get_swap_image_count() <= 2? 0ull: 100000000ull;
 	while (VkResult status = m_swapchain->acquire_next_swapchain_image(m_current_frame->acquire_signal_semaphore, timeout, &m_current_frame->present_image))
 	{
 		switch (status)
@@ -858,7 +859,7 @@ void VKGSRender::flip(const rsx::display_flip_info_t& info)
 	queue_swap_request();
 
 	m_frame_stats.flip_time = m_profiler.duration();
-
+	flush_command_queue(true);
 	m_frame->flip(m_context);
 	rsx::thread::flip(info);
 }

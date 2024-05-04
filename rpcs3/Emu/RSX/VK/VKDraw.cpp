@@ -928,7 +928,7 @@ void VKGSRender::emit_geometry(u32 sub_index)
 				vkCmdDraw(*m_current_command_buffer, range.count, 1, vertex_offset, 0);
 				vertex_offset += range.count;
 			}
-		}
+	}
 	}
 	else
 	{
@@ -952,7 +952,7 @@ void VKGSRender::emit_geometry(u32 sub_index)
 				vkCmdDrawIndexed(*m_current_command_buffer, count, 1, vertex_offset, 0, 0);
 				vertex_offset += count;
 			}
-		}
+	}
 	}
 
 	m_frame_stats.draw_exec_time += m_profiler.duration();
@@ -1001,8 +1001,8 @@ void VKGSRender::end()
 		if (m_current_frame->swap_command_buffer) [[unlikely]]
 		{
 			// Borrow time by using the auxilliary context
-			m_aux_frame_context.grab_resources(*m_current_frame);
-			m_current_frame = &m_aux_frame_context;
+			//m_aux_frame_context.grab_resources(*m_current_frame);
+			m_current_frame = &frame_context_storage[m_current_queue_index];
 		}
 
 		ensure(!m_current_frame->swap_command_buffer);

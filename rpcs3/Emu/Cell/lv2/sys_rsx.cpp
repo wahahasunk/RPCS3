@@ -551,12 +551,14 @@ error_code sys_rsx_context_attribute(u32 context_id, u32 package_id, u64 a3, u64
 		if ((a4 & 0x80000000) != 0)
 		{
 			// NOTE: There currently seem to only be 2 active heads on PS3
-			ensure(a3 < 3);
+			ensure(a3 < 2);
 
 			// last half byte gives buffer, 0xf seems to trigger just last queued
-			u8 idx_check = a4 & 0xf;
-			if (idx_check > 7)
-				flip_idx = driverInfo.head[a3].lastQueuedBufferId;
+			u8 idx_check = a4 & 0x18;
+			if (idx_check > 15)
+				flip_idx = driverInfo.head[0].lastQueuedBufferId;
+			else if (idx_check > 7)
+				flip_idx = driverInfo.head[1].lastQueuedBufferId;
 			else
 				flip_idx = idx_check;
 
@@ -600,7 +602,7 @@ error_code sys_rsx_context_attribute(u32 context_id, u32 package_id, u64 a3, u64
 	case 0x103: // Display Queue
 	{
 		// NOTE: There currently seem to only be 2 active heads on PS3
-		ensure(a3 < 3);
+		ensure(a3 < 2);
 
 		driverInfo.head[a3].lastQueuedBufferId = static_cast<u32>(a4);
 		driverInfo.head[a3].flipFlags |= 0x40000000 | (1 << a4);
@@ -641,6 +643,7 @@ error_code sys_rsx_context_attribute(u32 context_id, u32 package_id, u64 a3, u64
 		render->display_buffers[id].offset = offset;
 
 		render->display_buffers_count = std::max<u32>(id + 1, render->display_buffers_count);
+		//render->display_buffers_count += 1;
 	}
 	break;
 
@@ -678,7 +681,7 @@ error_code sys_rsx_context_attribute(u32 context_id, u32 package_id, u64 a3, u64
 		}
 
 		// NOTE: There currently seem to only be 2 active heads on PS3
-		ensure(a3 < 3);
+		ensure(a3 < 2);
 
 		driverInfo.head[a3].flipFlags.atomic_op([&](be_t<u32>& flipStatus)
 		{
@@ -856,7 +859,7 @@ error_code sys_rsx_context_attribute(u32 context_id, u32 package_id, u64 a3, u64
 	case 0xFEC: // hack: flip event notification
 	{
 		// we only ever use head 1 for now
-		ensure(a3 < 3);
+		ensure(a3 < 2);
 		driverInfo.head[a3].flipFlags |= 0x80000000;
 		driverInfo.head[a3].lastFlipTime = rsx_timeStamp(); // should rsxthread set this?
 		driverInfo.head[a3].flipBufferId = static_cast<u32>(a3);
@@ -878,7 +881,7 @@ error_code sys_rsx_context_attribute(u32 context_id, u32 package_id, u64 a3, u64
 		}
 
 		// NOTE: There currently seem to only be 2 active heads on PS3
-		ensure(a3 < 3);
+		ensure(a3 < 2);
 
 		// todo: this is wrong and should be 'second' vblank handler and freq, but since currently everything is reported as being 59.94, this should be fine
 		driverInfo.head[a3].lastSecondVTime.atomic_op([&](be_t<u64>& time)
