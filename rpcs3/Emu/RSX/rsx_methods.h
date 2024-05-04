@@ -10,23 +10,11 @@
 #include "Emu/Cell/timers.hpp"
 #include "Program/program_util.h"
 
+#include "NV47/FW/draw_call.hpp"
+
 namespace rsx
 {
-	enum class draw_command
-	{
-		none,
-		array,
-		inlined_array,
-		indexed,
-	};
-
-	enum command_barrier_type : u32
-	{
-		primitive_restart_barrier,
-		vertex_base_modifier_barrier,
-		index_base_modifier_barrier,
-		vertex_array_offset_modifier_barrier
-	};
+	using rsx_method_t = void(*)(struct context*, u32 reg, u32 arg);
 
 	enum command_execution_flags : u32
 	{
@@ -375,7 +363,7 @@ namespace rsx
 		}
 	};
 
-	using rsx_method_t = void(*)(class context*, u32 reg, u32 arg);
+	using rsx_method_t = void(*)(class thread*, u32 reg, u32 arg);
 
 	//TODO
 	union alignas(4) method_registers_t

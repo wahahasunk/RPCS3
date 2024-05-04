@@ -7,8 +7,6 @@
 #include "Core/RSXReservationLock.hpp"
 #include "Emu/Memory/vm_reservation.h"
 #include "Emu/Cell/lv2/sys_rsx.h"
-#include "NV47/context.h"
-
 #include "util/asm.hpp"
 
 #include <bitset>
@@ -824,15 +822,15 @@ namespace rsx
 				case FIFO::EMIT_END:
 				{
 					// Emit end command to close existing scope
-					AUDIT(in_begin_end);
-					methods[NV4097_SET_BEGIN_END](&ctx, NV4097_SET_BEGIN_END, 0);
+					//ensure(in_begin_end);
+					methods[NV4097_SET_BEGIN_END](this, NV4097_SET_BEGIN_END, 0);
 					break;
 				}
 				case FIFO::EMIT_BARRIER:
 				{
-					AUDIT(in_begin_end);
-					methods[NV4097_SET_BEGIN_END](&ctx, NV4097_SET_BEGIN_END, 0);
-					methods[NV4097_SET_BEGIN_END](&ctx, NV4097_SET_BEGIN_END, m_flattener.get_primitive());
+					//ensure(in_begin_end);
+					methods[NV4097_SET_BEGIN_END](this, NV4097_SET_BEGIN_END, 0);
+					methods[NV4097_SET_BEGIN_END](this, NV4097_SET_BEGIN_END, m_flattener.get_primitive());
 					break;
 				}
 				default:
@@ -851,19 +849,19 @@ namespace rsx
 			const u32 reg = (command.reg & 0xffff) >> 2;
 			const u32 value = command.value;
 
-			ctx.register_state->decode(reg, value);
+			method_registers.decode(reg, value);
 
 			if (auto method = methods[reg])
 			{
-				method(&ctx, reg, value);
+				method(this, reg, value);
 
 				if (state & cpu_flag::again)
 				{
-					ctx.register_state->decode(reg, ctx.register_state->latch);
+					method_registers.decode(reg, method_registers.register_previous_value);
 					break;
 				}
 			}
-			else if (ctx.register_state->latch != value)
+			else if (method_registers.register_previous_value != value)
 			{
 				// Something changed, set signal flags if any specified
 				m_graphics_state |= state_signals[reg];
